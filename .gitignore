@@ -1,0 +1,8 @@
+.stack-work/
+TAGS
+dist/
+\#*
+*#
+.#*
+*~
+.dir-locals.el
