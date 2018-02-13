@@ -142,7 +142,7 @@ newVEBGo n = do
     vMinMax <- newSTRef Nothing
     pure $ VNode {..}
 
-insert :: forall i s. (BRep i, Show i) => VEB s i -> i -> ST s ()
+insert :: forall i s. BRep i => VEB s i -> i -> ST s ()
 insert v00 e00 = insertDo (totalBits @i) v00 e00
   where
     insertDo :: Int -> VEB s i -> i -> ST s ()
@@ -174,18 +174,21 @@ insert v00 e00 = insertDo (totalBits @i) v00 e00
 
         maybe onEmptyMM onFullMM =<< readSTRef (vMinMax v)
 
+fromList :: forall i s. BRep i => [i] -> ST s (VEB s i)
+fromList toInsert = do
+    v <- newVEB @i
+    mapM_ (insert v) toInsert
+    pure v
+
 ----------------------------------------------------------------------------
 -- Tests
 ----------------------------------------------------------------------------
 
 testInt4 :: IO ()
-testInt4 = replicateM_ 100000 $ do
+testInt4 = replicateM_ 10000 $ do
     (iter :: Int) <- randomRIO (0, 20)
     toInsert <- nub . map Int4 <$> replicateM iter (randomRIO (0,15))
-    v <- stToIO $ do
-        v <- newVEB @Int4
-        mapM_ (insert v) toInsert
-        pure v
+    v <- stToIO $ fromList toInsert
     forM_ [0..15] $ \i -> do
         m <- stToIO (member v i)
         when (m && (not $ i `elem` toInsert)) $ do
@@ -205,12 +208,9 @@ testInt4 = replicateM_ 100000 $ do
         printVeb v
         error "C"
 
+testBug :: IO ()
 testBug = do
-    let toInsert = [1,5,10,14,15]
-    v <- stToIO $ do
-        v <- newVEB @Int4
-        mapM_ (insert v) toInsert
-        pure v
+    v <- stToIO $ fromList [1,5,10,14,(15 :: Int4)]
     printVeb v
     print =<< stToIO (toList v)
     forM_ [0..15] $ \i -> do
@@ -222,10 +222,7 @@ testRandom = do
     (iter :: Int) <- randomRIO (0, 400)
     vals <- nub <$> replicateM iter (randomRIO (0, maxBound @i))
     putStrLn "Generated, inserting"
-    v <- stToIO $ do
-        v <- newVEB @i
-        mapM_ (insert v) vals
-        pure v
+    v <- stToIO $ fromList vals
     putStrLn "Inserted, checking"
     r <- stToIO $ fmap and $ forM [0..maxBound @i] $ member v
     print r
