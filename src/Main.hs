@@ -6,15 +6,17 @@ import           Control.Monad    (forM, forM_, mapM, replicateM, replicateM_, u
                                    when)
 import           Control.Monad.ST
 import           Data.Array.ST
-import           Data.Bits        (Bits (..))
-import           Data.Bool        (bool)
-import           Data.Int         (Int16, Int64, Int8)
+import           Data.Bits        (Bits (..), FiniteBits (..))
+import           Data.Int
 import           Data.List        (intersperse, nub, sort)
 import           Data.Maybe       (isNothing)
 import           Data.STRef
 import           Data.Word
-import           Debug.Trace      (trace, traceM, traceShow, traceShowM)
 import           System.Random
+
+----------------------------------------------------------------------------
+-- BRep
+----------------------------------------------------------------------------
 
 -- could be Word8 instead of Int here, it's used for depth only
 class (Show i, Ord i, Integral i, Ix i) => BRep i where
@@ -27,6 +29,8 @@ class (Show i, Ord i, Integral i, Ix i) => BRep i where
     -- | Create a k bit number from k/2 high and low
     fromHighLow :: Int -> i -> i -> i
 
+    default totalBits :: FiniteBits i => Int
+    totalBits = finiteBitSize (0 :: i)
     default takeHigh :: Bits i => Int -> i -> i
     takeHigh k x = x `shiftR` (k `div` 2)
     default takeLow :: Bits i => Int -> i -> i
@@ -34,20 +38,12 @@ class (Show i, Ord i, Integral i, Ix i) => BRep i where
     default fromHighLow :: Bits i => Int -> i -> i -> i
     fromHighLow k h l = l .|. (h `shiftL` (k`div`2))
 
-instance BRep Int64 where
-    totalBits = 64
-
-instance BRep Int16 where
-    totalBits = 16
-
 instance BRep Int8 where
-    totalBits = 8
-
+instance BRep Int16 where
+instance BRep Int32 where
+instance BRep Int64 where
 instance BRep Word8 where
-    totalBits = 8
-
 instance BRep Word16 where
-    totalBits = 16
 
 -- for testing
 newtype Int4 = Int4 Int16 deriving (Eq,Ord,Real,Num,Enum,Integral,Bits,Ix)
@@ -76,6 +72,10 @@ testBRep = replicateM_ 100000 $ do
     when (lb > twoP) $ error $ "low > twoP: " ++ show b ++ " " ++ show x ++ " " ++ show lb
     when (hb > twoP) $ error $ "high > twoP: " ++ show b ++ " " ++ show x ++ " " ++ show hb
 
+----------------------------------------------------------------------------
+-- VEB
+----------------------------------------------------------------------------
+
 data VEB s i
     = VNode { vChildren :: STArray s i (VEB s i)
             , vAux      :: STRef s (VEB s i)
@@ -93,18 +93,18 @@ getMin = getMinMax fst
 getMax = getMinMax snd
 
 member :: forall s i. (BRep i) => VEB s i -> i -> ST s Bool
-member = memberGo (totalBits @i)
+member = memberK (totalBits @i)
 
-memberGo :: forall s i. (BRep i) => Int -> VEB s i -> i -> ST s Bool
-memberGo 0 _ _ = error "memberGo 0"
-memberGo k v e = do
+memberK :: forall s i. (BRep i) => Int -> VEB s i -> i -> ST s Bool
+memberK 0 _ _ = error "memberK 0"
+memberK k v e = do
     let checkChildren (VNode {..}) = do
             aux <- readSTRef vAux
             let h = takeHigh k e
             let k' = k `div` 2
-            b <- memberGo k' aux h
+            b <- memberK k' aux h
             if b then do vc <- readArray vChildren h
-                         memberGo (k `div` 2) vc (takeLow k e)
+                         memberK (k `div` 2) vc (takeLow k e)
                  else pure False -- child doesn't even exist
         checkChildren _            = pure False
 
@@ -144,7 +144,7 @@ printVeb v0 = putStrLn =<< stToIO (printGo (totalBits @i) v0)
         pure $ concat [ "{ \"leaf\": ", e, " }" ]
     printGo k VNode {..} = do
         let printChild j = do
-                b <- readSTRef vAux >>= \aux -> memberGo (k `div` 2) aux j
+                b <- readSTRef vAux >>= \aux -> memberK (k `div` 2) aux j
                 if b
                     then printGo (k `div` 2) =<< readArray vChildren j
                     else pure "null"
@@ -154,33 +154,31 @@ printVeb v0 = putStrLn =<< stToIO (printGo (totalBits @i) v0)
         pure $ concat ["{ \"children\": [", e1, "], \"aux\": ", e2 ,", \"mm\": ", e3, "}"]
 
 newVEB :: forall i s. BRep i => ST s (VEB s i)
-newVEB = newVEBGo $ totalBits @i
+newVEB = newVEBK $ totalBits @i
 
 -- | Creates k-tree
-newVEBGo :: forall i s. BRep i => Int -> ST s (VEB s i)
-newVEBGo i | i <= 0 = error "newVEBGo"
-newVEBGo 1 = VLeaf <$> newSTRef Nothing
-newVEBGo k = do
-    !() <- traceM $ "newVEBGO: " ++ show k
+newVEBK :: forall i s. BRep i => Int -> ST s (VEB s i)
+newVEBK i | i <= 0 = error "newVEBK"
+newVEBK 1 = VLeaf <$> newSTRef Nothing
+newVEBK k = do
     when (odd k) $ error $ "NewVebGo " ++ show k
     vChildren <- newArray_ (0, 2 ^ (fromIntegral k `div` (2 :: Int)) - 1)
-    vAux <- newSTRef =<< newVEBGo (k `div` 2)
+    vAux <- newSTRef =<< newVEBK (k `div` 2)
     vMinMax <- newSTRef Nothing
     pure $ VNode {..}
 
 insert :: forall i s. BRep i => VEB s i -> i -> ST s ()
-insert v00 e00 = insertDo (totalBits @i) v00 e00
+insert v00 e00 = insertK (totalBits @i) v00 e00
   where
-    insertDo :: Int -> VEB s i -> i -> ST s ()
-    insertDo 0 _v _e0 = error "insertDo 0"
-    insertDo k v e0 = do
+    insertK :: Int -> VEB s i -> i -> ST s ()
+    insertK 0 _v _e0 = error "insertK 0"
+    insertK k v e0 = do
         let onEmptyMM = writeSTRef (vMinMax v) (Just (e0,e0))
             onFullMM (tmin,tmax) | e0 == tmin || e0 == tmax = pure ()
             onFullMM (tmin,tmax) | tmin == tmax = do
                 let [newmin,newmax] = sort [tmin, e0]
                 writeSTRef (vMinMax v) $ Just (newmin,newmax)
             onFullMM (tmin,tmax) = do
-                !() <- traceM ("Mid : " ++ show (k,e0))
                 let [newmin,e,newmax] = sort [tmin, tmax, e0]
                 writeSTRef (vMinMax v) $ Just (newmin,newmax)
                 let ehigh = takeHigh k e
@@ -189,24 +187,16 @@ insert v00 e00 = insertDo (totalBits @i) v00 e00
                 case v of
                     VLeaf{} -> pure ()
                     VNode{..} -> do
-                        chBounds <- getBounds vChildren
                         aux <- readSTRef vAux
-                        childExists <- memberGo k' aux ehigh
+                        childExists <- memberK k' aux ehigh
                         if childExists
-                           then do
-                               !() <- traceM ("readArray: " ++ show (k,e0,e,chBounds,ehigh,elow))
-                               readArray vChildren ehigh >>= \v' -> insertDo k' v' elow
+                           then readArray vChildren ehigh >>= \v' -> insertK k' v' elow
                            else do
-                               !() <- traceM ("Aux: " ++ show (k,e,ehigh))
-                               insertDo k' aux ehigh
-                               newTree <- newVEBGo k'
-                               !() <- traceM ("Child: " ++ show (k,e,elow))
-                               insertDo k' newTree elow
-                               !() <- traceM ("ChildPost: " ++ show (k,e0,e,chBounds,ehigh))
+                               insertK k' aux ehigh
+                               newTree <- newVEBK k'
+                               insertK k' newTree elow
                                writeArray vChildren ehigh newTree
-                               pure ()
 
-        !() <- traceM ("Top : " ++ show (k,e0))
         maybe onEmptyMM onFullMM =<< readSTRef (vMinMax v)
 
 fromList :: forall i s. BRep i => [i] -> ST s (VEB s i)
@@ -235,6 +225,7 @@ testInt4 = replicateM_ 10000 $ do
             print i
             printVeb v
             error "B"
+
     asList <- stToIO (toList v)
     unless (sort asList == sort toInsert) $ do
         print $ sort toInsert
@@ -251,103 +242,36 @@ testBug = do
 -- debug this
 testRandom :: forall i. (BRep i, Random i, Show i, Bounded i) => IO ()
 testRandom = replicateM_ 20 $ do
-    (iter :: Int) <- randomRIO (0, 200)
+    (iter :: Int) <- randomRIO (0, 20000)
     vals <- nub <$> replicateM iter (randomRIO (0, maxBound @i))
-    print vals
-    v <- stToIO $ fromList vals
-    v2 <- stToIO $ toList v
+    !v <- stToIO $ fromList vals
 
-    forM_ [0..maxBound @i] $ \i -> do
+    forM_ vals $ \i -> do
         m <- stToIO (member v i)
-        when (m && (not $ i `elem` vals)) $ do
-            print $ sort vals
-            print i
-            error "A"
-        when (not m && (i `elem` vals)) $ do
+        unless m $ do
             print $ sort vals
             print i
             printVeb v
             error "B"
 
-    when (sort v2 /= sort vals) $ do
-        print $ sort vals
-        print $ sort v2
-        printVeb v
-        error "testRandom"
+--    !v2 <- stToIO $ toList v
+--    when (sort v2 /= sort vals) $ do
+--        print $ sort vals
+--        print $ sort v2
+--        printVeb v
+--        error "testRandom"
 
 main :: IO ()
 main = do
+    putStrLn "word8"
     testRandom @Word8
+    putStrLn "word16"
     testRandom @Word16
+    putStrLn "int8"
     testRandom @Int8
+    putStrLn "int16"
     testRandom @Int16
+    putStrLn "int32"
+    testRandom @Int32
+    putStrLn "int64"
     testRandom @Int64
-
-{-
-{ "children": [ { "children": [null, null], "mm": "(3,3)"}
-              , { "children": [null, null], "mm": "(0,0)"}
-              , null, null]
-, "mm": "(0,7)"}
-
-
-{ "children": [ { "children": [null, { "leaf": "(0,0)" }]
-                , "aux": { "leaf": "(1,1)" }
-                , "mm": "(1,3)"}
-              , { "children": [null, null]
-                , "aux": { "leaf": "mm0" }
-                , "mm": "(1,1)"}
-              , null
-              , { "children": [null, null]
-                , "aux": { "leaf": "mm0" }
-                , "mm": "(2,2)"}
-              ]
-, "aux": { "children": [{ "leaf": "(1,1)" }, null]
-         , "aux": { "leaf": "(0,0)" }
-         , "mm": "(0,3)"}
-, "mm": "(0,15)"}
-
-
-Doesn't have 10 but must
-[1,5,10,14,15]
-10
-
-{ "children": [ null
-              , { "children": [null, null]
-                , "aux": { "leaf": "mm0" }
-                , "mm": "(1,1)"}
-              , null
-              , { "children": [null, null]
-                , "aux": { "leaf": "mm0" }
-                , "mm": "(2,2)"}
-              ]
-, "aux": { "children": [null, { "leaf": "(0,0)" }]
-         , "aux": { "leaf": "(1,1)" }
-         , "mm": "(1,3)"}
-, "mm": "(1,15)"}
-
-POSTFIX:
-
-{ "children": [ null
-              , { "children": [null, null], "aux": { "leaf": "mm0" }, "mm": "(1,1)"}
-              , { "children": [null, null], "aux": { "leaf": "mm0" }, "mm": "(2,2)"}
-              , { "children": [null, null], "aux": { "leaf": "mm0" }, "mm": "(2,2)"}]
-, "aux": { "children": [null, { "leaf": "(0,0)" }]
-         , "aux": { "leaf": "(1,1)" }
-         , "mm": "(1,3)"}
-, "mm": "(1,15)"
-}
-
--}
-
-
-{-
-71,245,187 bug
-
-{ "children": [null, null, null, null, null, null, null, null]
-, "aux": { "children": [null, null, null, null]
-         , "aux": { "children": [null, null]
-                  , "aux": { "leaf": "mm0" }
-                  , "mm": "mm0"}
-         , "mm": "mm0"}
-, "mm": "(71,245)"}
--}
