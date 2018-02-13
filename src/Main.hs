@@ -13,11 +13,11 @@ import           Data.List        (intersperse, nub, sort)
 import           Data.Maybe       (isNothing)
 import           Data.STRef
 import           Data.Word
-import           Debug.Trace      (trace, traceShow, traceShowM)
+import           Debug.Trace      (trace, traceM, traceShow, traceShowM)
 import           System.Random
 
 -- could be Word8 instead of Int here, it's used for depth only
-class (Ord i, Integral i, Ix i) => BRep i where
+class (Show i, Ord i, Integral i, Ix i) => BRep i where
     -- | Return total number of bits.
     totalBits :: Int
     -- | Take high as we're k bit number.
@@ -52,6 +52,17 @@ instance Show Int4 where
     show (Int4 x) = show x
 instance BRep Int4 where
     totalBits = 4
+
+-- :thinking_face:
+testBRep :: forall i. (BRep i, Random i, Show i) => IO ()
+testBRep = replicateM_ 100000 $ do
+    let b = totalBits @i
+    k <- randomRIO (0,b)
+    x <- randomIO @i
+    let h = takeHigh k x
+    let l = takeLow k x
+    let x2 = fromHighLow k h l
+    unless (x2 == x) $ error $ "testBRep: " ++ show k ++ " " ++ show x
 
 data VEB s i
     = VNode { vChildren :: STArray s i (VEB s i)
@@ -133,12 +144,15 @@ printVeb v0 = putStrLn =<< stToIO (printGo (totalBits @i) v0)
 newVEB :: forall i s. BRep i => ST s (VEB s i)
 newVEB = newVEBGo $ totalBits @i
 
-newVEBGo :: BRep i => Int -> ST s (VEB s i)
+-- | Creates k-tree
+newVEBGo :: forall i s. BRep i => Int -> ST s (VEB s i)
 newVEBGo i | i <= 0 = error "newVEBGo"
 newVEBGo 1 = VLeaf <$> newSTRef Nothing
-newVEBGo n = do
-    vChildren <- newArray_ (0, fromIntegral n)
-    vAux <- newSTRef =<< newVEBGo (n `div` 2)
+newVEBGo k = do
+    !() <- traceM $ "newVEBGO: " ++ show k
+    when (odd k) $ error $ "NewVebGo " ++ show k
+    vChildren <- newArray_ (0, 2 ^ (fromIntegral k `div` (2 :: Int)) - 1)
+    vAux <- newSTRef =<< newVEBGo (k `div` 2)
     vMinMax <- newSTRef Nothing
     pure $ VNode {..}
 
@@ -154,6 +168,7 @@ insert v00 e00 = insertDo (totalBits @i) v00 e00
                 let [newmin,newmax] = sort [tmin, e0]
                 writeSTRef (vMinMax v) $ Just (newmin,newmax)
             onFullMM (tmin,tmax) = do
+                !() <- traceM ("Mid : " ++ show (k,e0))
                 let [newmin,e,newmax] = sort [tmin, tmax, e0]
                 writeSTRef (vMinMax v) $ Just (newmin,newmax)
                 let ehigh = takeHigh k e
@@ -167,11 +182,18 @@ insert v00 e00 = insertDo (totalBits @i) v00 e00
                         if childExists
                            then readArray vChildren ehigh >>= \v' -> insertDo k' v' elow
                            else do
+                               !() <- traceM ("Aux: " ++ show (k,e,ehigh))
                                insertDo k' aux ehigh
                                newTree <- newVEBGo k'
+                               !() <- traceM ("Child: " ++ show (k,e,elow))
                                insertDo k' newTree elow
+                               bounds <- getBounds vChildren
+                               !() <- traceM ("ChildPost: " ++ show bounds)
                                writeArray vChildren ehigh newTree
+                               !() <- traceM ("ChildPostPost: " ++ show (k,e,elow))
+                               pure ()
 
+        !() <- traceM ("Top : " ++ show (k,e0))
         maybe onEmptyMM onFullMM =<< readSTRef (vMinMax v)
 
 fromList :: forall i s. BRep i => [i] -> ST s (VEB s i)
@@ -202,15 +224,14 @@ testInt4 = replicateM_ 10000 $ do
             error "B"
     asList <- stToIO (toList v)
     unless (sort asList == sort toInsert) $ do
-        print $ sort $ toInsert
-        print asList
-        print toInsert
+        print $ sort toInsert
+        print $ sort asList
         printVeb v
         error "C"
 
 testBug :: IO ()
 testBug = do
-    v <- stToIO $ fromList [1,5,10,14,(15 :: Int4)]
+    v <- stToIO $ fromList [71,(245 :: Word8),187]
     printVeb v
     print =<< stToIO (toList v)
     forM_ [0..15] $ \i -> do
@@ -218,14 +239,31 @@ testBug = do
 
 -- debug this
 testRandom :: forall i. (BRep i, Random i, Show i, Bounded i) => IO ()
-testRandom = do
-    (iter :: Int) <- randomRIO (0, 400)
+testRandom = replicateM_ 2000 $ do
+    (iter :: Int) <- randomRIO (0, 3)
     vals <- nub <$> replicateM iter (randomRIO (0, maxBound @i))
-    putStrLn "Generated, inserting"
+    print vals
     v <- stToIO $ fromList vals
-    putStrLn "Inserted, checking"
-    r <- stToIO $ fmap and $ forM [0..maxBound @i] $ member v
-    print r
+    v2 <- stToIO $ toList v
+
+
+    forM_ [0..maxBound @i] $ \i -> do
+        m <- stToIO (member v i)
+        when (m && (not $ i `elem` vals)) $ do
+            print $ sort vals
+            print i
+            error "A"
+        when (not m && (i `elem` vals)) $ do
+            print $ sort vals
+            print i
+            printVeb v
+            error "B"
+
+    when (sort v2 /= sort vals) $ do
+        print $ sort vals
+        print $ sort v2
+        printVeb v
+        error "testRandom"
 
 main :: IO ()
 main = testRandom @Word8
@@ -284,4 +322,17 @@ POSTFIX:
 , "mm": "(1,15)"
 }
 
+-}
+
+
+{-
+71,245,187 bug
+
+{ "children": [null, null, null, null, null, null, null, null]
+, "aux": { "children": [null, null, null, null]
+         , "aux": { "children": [null, null]
+                  , "aux": { "leaf": "mm0" }
+                  , "mm": "mm0"}
+         , "mm": "mm0"}
+, "mm": "(71,245)"}
 -}
