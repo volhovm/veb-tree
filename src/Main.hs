@@ -2,17 +2,20 @@
 
 module Main where
 
+import           Control.DeepSeq  (NFData (..))
 import           Control.Monad    (forM, forM_, mapM, replicateM, replicateM_, unless,
-                                   when)
+                                   void, when)
 import           Control.Monad.ST
 import           Data.Array.ST
 import           Data.Bits        (Bits (..), FiniteBits (..))
 import           Data.Int
 import           Data.List        (intersperse, nub, sort)
-import           Data.Maybe       (isNothing)
+import           Data.Maybe       (fromMaybe, isNothing)
 import           Data.STRef
 import           Data.Word
 import           System.Random
+
+import           Gauge
 
 ----------------------------------------------------------------------------
 -- BRep
@@ -81,6 +84,9 @@ data VEB s i
             , vAux      :: STRef s (VEB s i)
             , vMinMax   :: STRef s (Maybe (i, i)) }
     | VLeaf { vMinMax :: STRef s (Maybe (i, i)) }
+
+instance NFData (VEB s i) where
+    rnf = const ()
 
 isEmpty :: (BRep i) => VEB s i -> ST s Bool
 isEmpty v = isNothing <$> readSTRef (vMinMax v)
@@ -205,6 +211,63 @@ fromList toInsert = do
     mapM_ (insert v) toInsert
     pure v
 
+delete :: forall i s. BRep i => VEB s i -> i -> ST s ()
+delete v00 e00 = void $ deleteK (totalBits @i) v00 e00
+  where
+    -- returns True if tree became empty
+    deleteK :: Int -> VEB s i -> i -> ST s Bool
+    deleteK 0 _v _e = error "insertK 0"
+    deleteK k v e = do
+        let k' = k `div` 2
+        let onFullMM (tmin,tmax) | tmin == tmax && tmin == e =
+                True <$ writeSTRef (vMinMax v) Nothing
+            onFullMM (tmin,tmax) | tmin == e = do
+                let maxIsMin = False <$ writeSTRef (vMinMax v) (Just (tmax,tmax))
+                case v of
+                    VLeaf{}   -> maxIsMin
+                    VNode{..} -> do
+                        aux <- readSTRef vAux
+                        getMin aux >>= \case
+                            Nothing -> maxIsMin
+                            Just auxMinHigh -> do
+                                c <- readArray vChildren auxMinHigh
+                                cMinLow <- fromMaybe (error "getMin: impossible") <$> getMin c
+                                nowEmpty <- deleteK k' c cMinLow
+                                when nowEmpty $ void $ deleteK k' aux auxMinHigh
+                                let fullMin = fromHighLow k auxMinHigh cMinLow
+                                False <$ writeSTRef vMinMax (Just (fullMin,tmax))
+            onFullMM (tmin,tmax) | tmax == e = do
+                let minIsMax = False <$ writeSTRef (vMinMax v) (Just (tmin,tmin))
+                case v of
+                    VLeaf{}   -> minIsMax
+                    VNode{..} -> do
+                        aux <- readSTRef vAux
+                        getMax aux >>= \case
+                            Nothing -> minIsMax
+                            Just auxMaxHigh -> do
+                                c <- readArray vChildren auxMaxHigh
+                                cMaxLow <- fromMaybe (error "getMax: impossible") <$> getMax c
+                                nowEmpty <- deleteK k' c cMaxLow
+                                when nowEmpty $ void $ deleteK k' aux auxMaxHigh
+                                let fullMax = fromHighLow k auxMaxHigh cMaxLow
+                                False <$ writeSTRef vMinMax (Just (tmin,fullMax))
+
+            onFullMM _ = case v of
+                VLeaf{} -> pure False -- nothing more we can do here
+                VNode{..} -> do
+                    aux <- readSTRef vAux
+                    let h = takeHigh k e
+                    memberK k' aux h >>= \case
+                        False -> pure False -- nothing to delete from :shrug:
+                        True -> do
+                            c <- readArray vChildren h
+                            nowEmpty <- deleteK k' c (takeLow k e)
+                            when nowEmpty $ void $ deleteK k' aux h
+                            pure False
+
+        maybe (pure False) onFullMM =<< readSTRef (vMinMax v)
+
+
 ----------------------------------------------------------------------------
 -- Tests
 ----------------------------------------------------------------------------
@@ -261,8 +324,8 @@ testRandom = replicateM_ 20 $ do
 --        printVeb v
 --        error "testRandom"
 
-main :: IO ()
-main = do
+sanityTests :: IO ()
+sanityTests = do
     putStrLn "word8"
     testRandom @Word8
     putStrLn "word16"
@@ -275,3 +338,69 @@ main = do
     testRandom @Int32
     putStrLn "int64"
     testRandom @Int64
+
+fib :: Int -> Int
+fib 0 = 0
+fib 1 = 1
+fib n = fib (n-1) + fib (n-2)
+
+vbToInsert :: forall i. (Random i, BRep i, Bounded i) => Int -> IO ([i],VEB RealWorld i)
+vbToInsert size = do
+    (iter :: Int) <- randomRIO (0, size)
+    elems <- nub <$> replicateM iter (randomRIO (0, maxBound @i))
+    v <- stToIO $ fromList elems
+    pure (elems, v)
+
+vebBench :: [Benchmark]
+vebBench =
+    [ bgroup "Int8" $ vb @Int8
+    , bgroup "Int16" $ vb @Int16
+    , bgroup "Int32" $ vb @Int32
+    ]
+  where
+    vb :: forall i. (BRep i, Bounded i, Random i, NFData i) => [Benchmark]
+    vb =
+        let vbNumbered ~n = env (vbToInsert @i n) $ allBenches n
+            allBenches n ~(elems,tree) =
+                bgroup (show n ++ "elems")
+                   [ bench "fromList" $ whnfIO $ stToIO $ fromList elems
+                   , bench "lookupAll" $ whnfIO $ stToIO $ forM elems (member tree)
+                   , bench "toList" $ whnfIO $ stToIO $ toList tree
+                   ]
+        in [ vbNumbered 2000
+           , vbNumbered 5000
+           , vbNumbered 10000
+           ]
+
+{-
+Int8/2000elems/fromList                  mean 78.43 μs  ( +- 4.455 μs  )
+Int8/2000elems/lookupAll                 mean 27.21 μs  ( +- 1.921 μs  )
+Int8/2000elems/toList                    mean 5.907 μs  ( +- 471.5 ns  )
+Int8/5000elems/fromList                  mean 83.09 μs  ( +- 2.175 μs  )
+Int8/5000elems/lookupAll                 mean 29.09 μs  ( +- 698.3 ns  )
+Int8/5000elems/toList                    mean 6.078 μs  ( +- 237.7 ns  )
+Int8/10000elems/fromList                 mean 83.99 μs  ( +- 4.685 μs  )
+Int8/10000elems/lookupAll                mean 29.68 μs  ( +- 1.782 μs  )
+Int8/10000elems/toList                   mean 6.143 μs  ( +- 290.5 ns  )
+Int16/2000elems/fromList                 mean 2.844 ms  ( +- 185.6 μs  )
+Int16/2000elems/lookupAll                mean 525.5 μs  ( +- 50.19 μs  )
+Int16/2000elems/toList                   mean 161.3 μs  ( +- 12.75 μs  )
+Int16/5000elems/fromList                 mean 13.32 ms  ( +- 558.1 μs  )
+Int16/5000elems/lookupAll                mean 2.773 ms  ( +- 167.4 μs  )
+Int16/5000elems/toList                   mean 862.8 μs  ( +- 105.7 μs  )
+Int16/10000elems/fromList                mean 13.71 ms  ( +- 1.777 ms  )
+Int16/10000elems/lookupAll               mean 3.581 ms  ( +- 402.3 μs  )
+Int16/10000elems/toList                  mean 1.323 ms  ( +- 199.5 μs  )
+Int32/2000elems/fromList                 mean 6.412 ms  ( +- 155.5 μs  )
+Int32/2000elems/lookupAll                mean 308.6 μs  ( +- 21.20 μs  )
+Int32/2000elems/toList                   mean 289.3 μs  ( +- 70.53 μs  )
+Int32/5000elems/fromList                 mean 41.34 ms  ( +- 3.721 ms  )
+Int32/5000elems/lookupAll                mean 3.506 ms  ( +- 198.1 μs  )
+Int32/5000elems/toList                   mean 3.614 ms  ( +- 219.0 μs  )
+Int32/10000elems/fromList                mean 2.942 ms  ( +- 113.6 μs  )
+Int32/10000elems/lookupAll               mean 120.8 μs  ( +- 9.674 μs  )
+Int32/10000elems/toList                  mean 104.5 μs  ( +- 8.838 μs  )
+-}
+
+main :: IO ()
+main = defaultMain vebBench
