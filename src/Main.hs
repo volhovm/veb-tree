@@ -24,11 +24,15 @@ class (Ord i, Integral i, Ix i) => BRep i where
     takeHigh :: Int -> i -> i
     -- | Take low as we're k bit number.
     takeLow :: Int -> i -> i
+    -- | Create a k bit number from k/2 high and low
+    fromHighLow :: Int -> i -> i -> i
 
     default takeHigh :: Bits i => Int -> i -> i
     takeHigh k x = x `shiftR` (k `div` 2)
     default takeLow :: Bits i => Int -> i -> i
     takeLow k x = x .&. ((2^k-1) `shiftR` (k`div`2))
+    default fromHighLow :: Bits i => Int -> i -> i -> i
+    fromHighLow k h l = l .|. (h `shiftL` (k`div`2))
 
 instance BRep Int64 where
     totalBits = 64
@@ -65,7 +69,6 @@ getMin, getMax :: VEB s i -> ST s (Maybe i)
 getMin = getMinMax fst
 getMax = getMinMax snd
 
-
 member :: forall s i. (BRep i) => VEB s i -> i -> ST s Bool
 member = memberGo (totalBits @i)
 
@@ -75,7 +78,8 @@ memberGo k v e = do
     let checkChildren (VNode {..}) = do
             aux <- readSTRef vAux
             let h = takeHigh k e
-            b <- memberGo (k `div` 2) aux h
+            let k' = k `div` 2
+            b <- memberGo k' aux h
             if b then do vc <- readArray vChildren h
                          memberGo (k `div` 2) vc (takeLow k e)
                  else pure False -- child doesn't even exist
@@ -86,14 +90,26 @@ memberGo k v e = do
                                     then pure True
                                     else checkChildren v) mm
 
--- inline
-getChild :: (BRep i) => Int -> VEB s i -> i -> ST s (Maybe (VEB s i))
-getChild _ VLeaf{} _ = error "getChild leaf"
-getChild k VNode{..} j = do
-    b <- readSTRef vAux >>= \aux -> memberGo (k `div` 2) aux j
-    if b
-        then Just <$> readArray vChildren j
-        else pure Nothing
+toList :: forall i s. (BRep i) => VEB s i -> ST s [i]
+toList = toListK (totalBits @i)
+  where
+    toListMM :: STRef s (Maybe (i,i)) -> ST s [i]
+    toListMM s = maybe ([]) (\(a,b) -> nub [a,b]) <$> readSTRef s
+
+    toListK :: Int -> VEB s i -> ST s [i]
+    toListK 0 = error "toListK 0"
+    toListK k = \case
+        VLeaf {..} -> toListMM vMinMax
+        VNode {..} -> do
+            auxFlat <- toListK (k `div` 2) =<< readSTRef vAux
+            (childrenFlat :: [i]) <-
+                fmap concat $ forM auxFlat $ \iHigh -> do
+                    c <- readArray vChildren iHigh
+                    -- C♭, hehe
+                    (cFlat :: [i]) <- toListK (k `div` 2) c
+                    pure $ map (fromHighLow k iHigh) cFlat
+            mmList <- toListMM vMinMax
+            pure $ childrenFlat ++ mmList
 
 printVeb :: forall i. (BRep i, Show i) => VEB RealWorld i -> IO ()
 printVeb v0 = putStrLn =<< stToIO (printGo (totalBits @i) v0)
@@ -163,7 +179,7 @@ insert v00 e00 = insertDo (totalBits @i) v00 e00
 ----------------------------------------------------------------------------
 
 testInt4 :: IO ()
-testInt4 = replicateM_ 10000 $ do
+testInt4 = replicateM_ 100000 $ do
     (iter :: Int) <- randomRIO (0, 20)
     toInsert <- nub . map Int4 <$> replicateM iter (randomRIO (0,15))
     v <- stToIO $ do
@@ -181,6 +197,13 @@ testInt4 = replicateM_ 10000 $ do
             print i
             printVeb v
             error "B"
+    asList <- stToIO (toList v)
+    unless (sort asList == sort toInsert) $ do
+        print $ sort $ toInsert
+        print asList
+        print toInsert
+        printVeb v
+        error "C"
 
 testBug = do
     let toInsert = [1,5,10,14,15]
@@ -189,9 +212,9 @@ testBug = do
         mapM_ (insert v) toInsert
         pure v
     printVeb v
+    print =<< stToIO (toList v)
     forM_ [0..15] $ \i -> do
         print =<< stToIO (member v i)
-
 
 -- debug this
 testRandom :: forall i. (BRep i, Random i, Show i, Bounded i) => IO ()
