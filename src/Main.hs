@@ -30,7 +30,7 @@ class (Show i, Ord i, Integral i, Ix i) => BRep i where
     default takeHigh :: Bits i => Int -> i -> i
     takeHigh k x = x `shiftR` (k `div` 2)
     default takeLow :: Bits i => Int -> i -> i
-    takeLow k x = x .&. ((2^k-1) `shiftR` (k`div`2))
+    takeLow k x = x .&. (2^(k`div`2)-1)
     default fromHighLow :: Bits i => Int -> i -> i -> i
     fromHighLow k h l = l .|. (h `shiftL` (k`div`2))
 
@@ -46,6 +46,9 @@ instance BRep Int8 where
 instance BRep Word8 where
     totalBits = 8
 
+instance BRep Word16 where
+    totalBits = 16
+
 -- for testing
 newtype Int4 = Int4 Int16 deriving (Eq,Ord,Real,Num,Enum,Integral,Bits,Ix)
 instance Show Int4 where
@@ -57,12 +60,21 @@ instance BRep Int4 where
 testBRep :: forall i. (BRep i, Random i, Show i) => IO ()
 testBRep = replicateM_ 100000 $ do
     let b = totalBits @i
-    k <- randomRIO (0,b)
+    let log2 :: Int -> Int
+        log2 (fromIntegral -> x) = round $ (log x :: Double) / log 2
+    kp <- randomRIO (0,log2 b)
+    let k = 2 ^ kp
     x <- randomIO @i
     let h = takeHigh k x
     let l = takeLow k x
     let x2 = fromHighLow k h l
     unless (x2 == x) $ error $ "testBRep: " ++ show k ++ " " ++ show x
+
+    let hb = takeHigh b x
+    let lb = takeLow b x
+    let twoP = 2^(b-1)
+    when (lb > twoP) $ error $ "low > twoP: " ++ show b ++ " " ++ show x ++ " " ++ show lb
+    when (hb > twoP) $ error $ "high > twoP: " ++ show b ++ " " ++ show x ++ " " ++ show hb
 
 data VEB s i
     = VNode { vChildren :: STArray s i (VEB s i)
@@ -177,20 +189,21 @@ insert v00 e00 = insertDo (totalBits @i) v00 e00
                 case v of
                     VLeaf{} -> pure ()
                     VNode{..} -> do
+                        chBounds <- getBounds vChildren
                         aux <- readSTRef vAux
                         childExists <- memberGo k' aux ehigh
                         if childExists
-                           then readArray vChildren ehigh >>= \v' -> insertDo k' v' elow
+                           then do
+                               !() <- traceM ("readArray: " ++ show (k,e0,e,chBounds,ehigh,elow))
+                               readArray vChildren ehigh >>= \v' -> insertDo k' v' elow
                            else do
                                !() <- traceM ("Aux: " ++ show (k,e,ehigh))
                                insertDo k' aux ehigh
                                newTree <- newVEBGo k'
                                !() <- traceM ("Child: " ++ show (k,e,elow))
                                insertDo k' newTree elow
-                               bounds <- getBounds vChildren
-                               !() <- traceM ("ChildPost: " ++ show bounds)
+                               !() <- traceM ("ChildPost: " ++ show (k,e0,e,chBounds,ehigh))
                                writeArray vChildren ehigh newTree
-                               !() <- traceM ("ChildPostPost: " ++ show (k,e,elow))
                                pure ()
 
         !() <- traceM ("Top : " ++ show (k,e0))
@@ -231,21 +244,18 @@ testInt4 = replicateM_ 10000 $ do
 
 testBug :: IO ()
 testBug = do
-    v <- stToIO $ fromList [71,(245 :: Word8),187]
+    v <- stToIO $ fromList [38::Int8,92,64,79,77]
     printVeb v
     print =<< stToIO (toList v)
-    forM_ [0..15] $ \i -> do
-        print =<< stToIO (member v i)
 
 -- debug this
 testRandom :: forall i. (BRep i, Random i, Show i, Bounded i) => IO ()
-testRandom = replicateM_ 2000 $ do
-    (iter :: Int) <- randomRIO (0, 3)
+testRandom = replicateM_ 20 $ do
+    (iter :: Int) <- randomRIO (0, 200)
     vals <- nub <$> replicateM iter (randomRIO (0, maxBound @i))
     print vals
     v <- stToIO $ fromList vals
     v2 <- stToIO $ toList v
-
 
     forM_ [0..maxBound @i] $ \i -> do
         m <- stToIO (member v i)
@@ -266,7 +276,12 @@ testRandom = replicateM_ 2000 $ do
         error "testRandom"
 
 main :: IO ()
-main = testRandom @Word8
+main = do
+    testRandom @Word8
+    testRandom @Word16
+    testRandom @Int8
+    testRandom @Int16
+    testRandom @Int64
 
 {-
 { "children": [ { "children": [null, null], "mm": "(3,3)"}
