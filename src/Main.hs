@@ -2,15 +2,16 @@
 
 module Main where
 
-import           Control.Monad    (mapM)
+import           Control.Monad    (forM, forM_, mapM, replicateM)
 import           Control.Monad.ST
 import           Data.Array.ST
 import           Data.Bits        (Bits (..))
 import           Data.Bool        (bool)
 import           Data.Int         (Int16, Int64)
-import           Data.List        (intersperse)
+import           Data.List        (intersperse, nub)
 import           Data.Maybe       (isNothing)
 import           Data.STRef
+import           System.Random
 
 -- could be Word8 instead of Int here, it's used for depth only
 class (Ord i, Integral i, Ix i) => BRep i where
@@ -96,9 +97,9 @@ printVeb v0 = putStrLn =<< stToIO (printGo (totalBits @i) v0)
                     then printGo (k `div` 2) =<< readArray vChildren j
                     else pure "null"
         e1 <- concat . intersperse ", " <$> mapM printChild [0..(fromIntegral k)-1]
-        (e2 :: String) <- printGo (k `div` 2) =<< readSTRef vAux
+        --(e2 :: String) <- printGo (k `div` 2) =<< readSTRef vAux
         e3 <- printMinMax vMinMax
-        pure $ concat ["{ \"children\": [", e1, "], \"aux\": ", e2, ", \"mm\": ", e3, "}"]
+        pure $ concat ["{ \"children\": [", e1, "], \"mm\": ", e3, "}"]
 
 newVEB :: forall i s. BRep i => ST s (VEB s i)
 newVEB = newVEBGo $ totalBits @i
@@ -139,25 +140,30 @@ insert = insertDo (totalBits @i)
 
         maybe onEmptyMM onFullMM =<< readSTRef (vMinMax v)
 
-main :: IO ()
-main = do
+testInt4 :: IO ()
+testInt4 = do
     v <- stToIO $ do
         v <- newVEB @Int4
         mapM_ (insert v) [0, 1, 2, 3, 5, 14, 15]
         pure v
     printVeb v
+    forM_ [0..15] $ \i -> do
+        putStr (show i ++ ": ")
+        print =<< stToIO (member v i)
 
-{-
-{ "children": [ { "children": [null, { "leaf": "(0,1)" }]
-                , "aux": { "leaf": "(1,1)" }
-                , "mm": {"(1,3)"} }
-              , { "children": [null, null]
-                , "aux": { "leaf": "mm0" }
-                , "mm": {"(1,1)"} }
-              , null
-              , { "children": [ null, { "leaf": "(1,1)" }]
-                , "aux": { "leaf": "(1,1)" }
-                , "mm": {"(2,3)"} }
-              ]
-, "aux": { "children": [{ "leaf": "(1,1)" }, { "leaf": "(1,1)" }], "aux": { "leaf": "(0,1)" }, "mm": {"(0,3)"} }, "mm": {"(0,15)"} }
--}
+-- debug this
+testInt16 :: IO ()
+testInt16 = do
+    (iter :: Int) <- randomRIO (200, 400)
+    vals <- nub <$> replicateM iter (randomIO @Int16)
+    putStrLn "kek"
+    v <- stToIO $ do
+        v <- newVEB @Int16
+        mapM_ (insert v) vals
+        pure v
+    putStrLn "mda"
+    r <- stToIO $ fmap and $ forM [0..maxBound @Int16] $ member v
+    print r
+
+main :: IO ()
+main = testInt16
