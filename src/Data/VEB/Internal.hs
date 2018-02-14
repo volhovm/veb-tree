@@ -10,7 +10,7 @@
 module Data.VEB.Internal where
 
 import Control.Monad (forM, mapM, void, when)
-import Control.Monad.ST (RealWorld, ST, stToIO)
+import Control.Monad.ST (ST)
 import Data.Array.ST (Ix, STArray, newArray_, readArray, writeArray)
 import Data.Bits (Bits (..), FiniteBits (..))
 import Data.List (intersperse, nub, sort)
@@ -137,11 +137,11 @@ toList = toListK (totalBits @i)
             pure $ childrenFlat ++ mmList
 
 -- | Prints 'VEB' in json-like format.
-printVEB :: forall i. (BRep i, Show i) => VEB RealWorld i -> IO String
-printVEB v0 = stToIO (printGo (totalBits @i) v0)
+printVEB :: forall i s. (BRep i, Show i) => VEB s i -> ST s String
+printVEB v0 = printGo (totalBits @i) v0
   where
     printMinMax s = maybe "\"mm0\"" (show . show) <$> readSTRef s
-    printGo :: Int -> VEB RealWorld i -> ST RealWorld String
+    printGo :: Int -> VEB s i -> ST s String
     printGo _ VLeaf {..} = do
         e <- printMinMax vMinMax
         pure $ concat [ "{ \"leaf\": ", e, " }" ]
