@@ -3,3 +3,5 @@ packages:
 - .
 extra-deps:
 - gauge-0.2.1
+nix:
+  shell-file: shell.nix
