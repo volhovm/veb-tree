@@ -30,7 +30,8 @@ spec = do
         describe "Word16" $ brepSpec @Word16
         describe "Word32" $ brepSpec @Word32
         describe "Word64" $ brepSpec @Word64
-    describe "VEB Word32" $ vebSpec @Word32
+    describe "VEB Word8 (small elem space)" $ vebSpec @Word8
+    describe "VEB Word32 (big elem space)" $ vebSpec @Word32
 
 genBRepK :: forall i. (BRep i) => Gen Int
 genBRepK = do

@@ -23,15 +23,16 @@ import Data.Word (Word16, Word32, Word64, Word8)
 ----------------------------------------------------------------------------
 
 -- could be Word8 instead of Int here, it's used for depth only
--- | Types that can be used as elements of 'VEB'.
+-- | Types that can be used as elements of 'VEB' (can be split in
+-- high/low).
 class (Show i, Ord i, Integral i, Ix i) => BRep i where
     -- | Return total number of bits.
     totalBits :: Int
-    -- | Take high as we're k bit number.
+    -- | Take high as we're @k@ bit number.
     takeHigh :: Int -> i -> i
-    -- | Take low as we're k bit number.
+    -- | Take low as we're @k@ bit number.
     takeLow :: Int -> i -> i
-    -- | Create a k bit number from k/2 high and low
+    -- | Create a @k@ bit number from @k/2@ high and low parts.
     fromHighLow :: Int -> i -> i -> i
 
     default totalBits :: FiniteBits i => Int
@@ -62,27 +63,38 @@ instance BRep Int4 where
 -- VEB
 ----------------------------------------------------------------------------
 
+-- | Van Emde Boas tree.
 data VEB s i
     = VNode { vChildren :: STArray s i (VEB s i)
             , vAux      :: STRef s (VEB s i)
             , vMinMax   :: STRef s (Maybe (i, i)) }
+      -- ^ Trees of k > 1, have children, aux and minmax.
     | VLeaf { vMinMax :: STRef s (Maybe (i, i)) }
+      -- ^ Trees of k = 1, always have zero children and empty aux, so
+      -- it's ommited.
 
+-- | Checks if tree is empty.
 isEmpty :: (BRep i) => VEB s i -> ST s Bool
 isEmpty v = isNothing <$> readSTRef (vMinMax v)
 
 getMinMax :: ((i,i) -> i) -> VEB s i -> ST s (Maybe i)
 getMinMax g v = fmap g <$> readSTRef (vMinMax v)
 
-getMin, getMax :: VEB s i -> ST s (Maybe i)
+-- | Gets minimal element from the tree.
+getMin :: VEB s i -> ST s (Maybe i)
 getMin = getMinMax fst
+
+-- | Gets maximum element from the tree.
+getMax :: VEB s i -> ST s (Maybe i)
 getMax = getMinMax snd
 
-notMember :: forall i s. (BRep i) => VEB s i -> i -> ST s Bool
-notMember v = fmap not . member v
-
+-- | Checks if element is a member of a tree.
 member :: forall i s. (BRep i) => VEB s i -> i -> ST s Bool
 member = memberK (totalBits @i)
+
+-- | Opposite of 'member'.
+notMember :: forall i s. (BRep i) => VEB s i -> i -> ST s Bool
+notMember v = fmap not . member v
 
 memberK :: forall i s. (BRep i) => Int -> VEB s i -> i -> ST s Bool
 memberK 0 _ _ = error "memberK 0"
@@ -102,6 +114,7 @@ memberK k v e = do
                                     then pure True
                                     else checkChildren v) mm
 
+-- | Converts 'VEB' to list.
 toList :: forall i s. (BRep i) => VEB s i -> ST s [i]
 toList = toListK (totalBits @i)
   where
@@ -123,8 +136,9 @@ toList = toListK (totalBits @i)
             mmList <- toListMM vMinMax
             pure $ childrenFlat ++ mmList
 
-printVEB :: forall i. (BRep i, Show i) => VEB RealWorld i -> IO ()
-printVEB v0 = putStrLn =<< stToIO (printGo (totalBits @i) v0)
+-- | Prints 'VEB' in json-like format.
+printVEB :: forall i. (BRep i, Show i) => VEB RealWorld i -> IO String
+printVEB v0 = stToIO (printGo (totalBits @i) v0)
   where
     printMinMax s = maybe "\"mm0\"" (show . show) <$> readSTRef s
     printGo :: Int -> VEB RealWorld i -> ST RealWorld String
@@ -142,10 +156,11 @@ printVEB v0 = putStrLn =<< stToIO (printGo (totalBits @i) v0)
         e3 <- printMinMax vMinMax
         pure $ concat ["{ \"children\": [", e1, "], \"aux\": ", e2 ,", \"mm\": ", e3, "}"]
 
+-- | Creates new 'VEB'.
 newVEB :: forall i s. BRep i => ST s (VEB s i)
 newVEB = newVEBK $ totalBits @i
 
--- | Creates k-tree
+-- Creates VEB k-tree.
 newVEBK :: forall i s. BRep i => Int -> ST s (VEB s i)
 newVEBK i | i <= 0 = error "newVEBK"
 newVEBK 1 = VLeaf <$> newSTRef Nothing
@@ -156,6 +171,7 @@ newVEBK k = do
     vMinMax <- newSTRef Nothing
     pure $ VNode {..}
 
+-- | Inserts an element into the 'VEB'.
 insert :: forall i s. BRep i => VEB s i -> i -> ST s ()
 insert v00 e00 = insertK (totalBits @i) v00 e00
   where
@@ -188,12 +204,15 @@ insert v00 e00 = insertK (totalBits @i) v00 e00
 
         maybe onEmptyMM onFullMM =<< readSTRef (vMinMax v)
 
+-- | Converts a list to a 'VEB' by creating a new tree and inserting all
+-- elements into it.
 fromList :: forall i s. BRep i => [i] -> ST s (VEB s i)
 fromList toInsert = do
     v <- newVEB @i
     mapM_ (insert v) toInsert
     pure v
 
+-- | Deletes an element from a list.
 delete :: forall i s. BRep i => VEB s i -> i -> ST s ()
 delete v00 e00 = void $ deleteK (totalBits @i) v00 e00
   where
@@ -202,39 +221,31 @@ delete v00 e00 = void $ deleteK (totalBits @i) v00 e00
     deleteK 0 _v _e = error "insertK 0"
     deleteK k v e = do
         let k' = k `div` 2
+        let cornerCase (tmin,tmax) isMin = do
+                let isOther = False <$ writeSTRef (vMinMax v)
+                                                  (Just $ if isMin then (tmax,tmax)
+                                                                   else (tmin,tmin))
+                let getter = if isMin then getMin else getMax
+                case v of
+                    VLeaf{}   -> isOther
+                    VNode{..} -> do
+                        aux <- readSTRef vAux
+                        getter aux >>= \case
+                            Nothing -> isOther
+                            Just auxMHigh -> do
+                                c <- readArray vChildren auxMHigh
+                                cMLow <-
+                                    fromMaybe (error $ "cornerCase: impossible " ++ show isMin) <$>
+                                    getter c
+                                nowEmpty <- deleteK k' c cMLow
+                                when nowEmpty $ void $ deleteK k' aux auxMHigh
+                                let fullM = fromHighLow k auxMHigh cMLow
+                                False <$ writeSTRef vMinMax (Just $ if isMin then (fullM,tmax)
+                                                                             else (tmin,fullM))
         let onFullMM (tmin,tmax) | tmin == tmax && tmin == e =
                 True <$ writeSTRef (vMinMax v) Nothing
-            onFullMM (tmin,tmax) | tmin == e = do
-                let maxIsMin = False <$ writeSTRef (vMinMax v) (Just (tmax,tmax))
-                case v of
-                    VLeaf{}   -> maxIsMin
-                    VNode{..} -> do
-                        aux <- readSTRef vAux
-                        getMin aux >>= \case
-                            Nothing -> maxIsMin
-                            Just auxMinHigh -> do
-                                c <- readArray vChildren auxMinHigh
-                                cMinLow <- fromMaybe (error "getMin: impossible") <$> getMin c
-                                nowEmpty <- deleteK k' c cMinLow
-                                when nowEmpty $ void $ deleteK k' aux auxMinHigh
-                                let fullMin = fromHighLow k auxMinHigh cMinLow
-                                False <$ writeSTRef vMinMax (Just (fullMin,tmax))
-            onFullMM (tmin,tmax) | tmax == e = do
-                let minIsMax = False <$ writeSTRef (vMinMax v) (Just (tmin,tmin))
-                case v of
-                    VLeaf{}   -> minIsMax
-                    VNode{..} -> do
-                        aux <- readSTRef vAux
-                        getMax aux >>= \case
-                            Nothing -> minIsMax
-                            Just auxMaxHigh -> do
-                                c <- readArray vChildren auxMaxHigh
-                                cMaxLow <- fromMaybe (error "getMax: impossible") <$> getMax c
-                                nowEmpty <- deleteK k' c cMaxLow
-                                when nowEmpty $ void $ deleteK k' aux auxMaxHigh
-                                let fullMax = fromHighLow k auxMaxHigh cMaxLow
-                                False <$ writeSTRef vMinMax (Just (tmin,fullMax))
-
+            onFullMM t@(tmin,_) | tmin == e = cornerCase t True
+            onFullMM t@(_,tmax) | tmax == e = cornerCase t False
             onFullMM _ = case v of
                 VLeaf{} -> pure False -- nothing more we can do here
                 VNode{..} -> do
