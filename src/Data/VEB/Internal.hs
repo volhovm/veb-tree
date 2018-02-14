@@ -52,10 +52,10 @@ instance BRep Word64 where
     takeHigh k x = x `shiftR` (k `div` 2)
 
 -- for testing
-newtype Int4 = Int4 Word16 deriving (Eq,Ord,Real,Num,Enum,Integral,Bits,Ix)
-instance Show Int4 where
-    show (Int4 x) = show x
-instance BRep Int4 where
+newtype Word4 = Word4 Word16 deriving (Eq,Ord,Real,Num,Enum,Integral,Bits,Ix)
+instance Show Word4 where
+    show (Word4 x) = show x
+instance BRep Word4 where
     totalBits = 4
     takeHigh k x = x `shiftR` (k `div` 2)
 

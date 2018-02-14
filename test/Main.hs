@@ -12,16 +12,18 @@ import Control.Monad (forM, forM_)
 import Control.Monad.ST (stToIO)
 import Data.List (nub, sort, (\\))
 import Data.Word (Word16, Word32, Word64, Word8)
-import System.Random
 import Test.Hspec (Spec, describe, hspec)
 import Test.Hspec.QuickCheck (prop)
 import Test.QuickCheck
 
-import Data.VEB.Internal (BRep (..))
+import Data.VEB.Internal (BRep (..), Word4)
 import qualified Data.VEB.Internal as V
 
 main :: IO ()
 main = hspec $ spec
+
+instance Arbitrary Word4 where
+    arbitrary = V.Word4 <$> choose (0,15)
 
 spec :: Spec
 spec = do
@@ -30,6 +32,7 @@ spec = do
         describe "Word16" $ brepSpec @Word16
         describe "Word32" $ brepSpec @Word32
         describe "Word64" $ brepSpec @Word64
+    describe "VEB Word8 (very small elem space)" $ vebSpec @Word4
     describe "VEB Word8 (small elem space)" $ vebSpec @Word8
     describe "VEB Word32 (big elem space)" $ vebSpec @Word32
 
@@ -40,7 +43,7 @@ genBRepK = do
    kp <- choose (0,log2 (totalBits @i))
    pure $ 2 ^ kp
 
-brepSpec :: forall i. (BRep i, Random i, Show i, Arbitrary i) => Spec
+brepSpec :: forall i. (BRep i, Show i, Arbitrary i) => Spec
 brepSpec = do
     prop "takeHigh,takeLow ~= fromHighLow" $
         forAll ((,) <$> genBRepK @i <*> arbitrary @i) $ \(k,x) ->
@@ -49,7 +52,7 @@ brepSpec = do
     prop "low < 2^(k-1)" $ halfLess takeLow
     prop "high < 2^(k-1)" $ halfLess takeHigh
 
-vebSpec :: forall i. (BRep i, Random i, Show i, Bounded i, Arbitrary i) => Spec
+vebSpec :: forall i. (BRep i, Show i, Arbitrary i) => Spec
 vebSpec = do
     prop "newVEB doesn't fail" $ stProp $ True <$ (V.newVEB @i)
     prop "fromList . toList = id" $ forAll (listOf (arbitrary @i)) $ \(nub -> xs) ->
